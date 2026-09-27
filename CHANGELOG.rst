@@ -6,6 +6,15 @@ Changelog
 
 Bugfixes
 ~~~~~~~~
+- Fix ``OverflowError`` on 32-bit platforms, where the C ``time_t`` type cannot
+  represent timestamps outside [1901-12-13, 2038-01-19] and
+  ``datetime.fromtimestamp()`` raises for them
+  (https://github.com/python/cpython/issues/101069). All timestamp-to-datetime
+  conversions (``timestamp_to_datetime``, ``croniter_range()`` with float
+  bounds, and ``expand_from_start_time`` expansion) now use pure ``datetime``
+  arithmetic instead of ``fromtimestamp()``, so dates beyond 2038 or before
+  1901 work regardless of the platform ``time_t`` width. ``OVERFLOW32B_MODE``
+  is kept for backward compatibility but is no longer consulted.
 - Fix ``get_next``/``get_prev`` raising ``CroniterBadDateError`` when day-of-month and day-of-week are both restricted and the day-of-month can never occur in the selected month (e.g. ``0 0 31 2 0``). Under the Vixie OR semantics the unsatisfiable side now contributes no dates instead of aborting the whole expression, and ``match()`` and ``croniter_range()``, which swallow the error, no longer return silently wrong results for these expressions. [b245ab6, #243, @semx, @MildlyMeticulous]
 - Fix hashed divisions (``H/{divisor}``, ``H({begin}-{end})/{divisor}``) when the divisor
   is as wide as, or wider than, the range it is drawn from. Three symptoms, one cause:

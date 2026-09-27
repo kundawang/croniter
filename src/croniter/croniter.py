@@ -4,62 +4,36 @@ import calendar
 import copy
 import datetime
 import math
-import platform
 import random
 import re
-import struct
-import sys
 import traceback as _traceback
 from time import time
 from typing import Any, Literal, Optional, Union
 
 from dateutil.relativedelta import relativedelta
-from dateutil.tz import datetime_exists, tzutc
+from dateutil.tz import datetime_exists
 
 ExpandedExpression = list[Union[int, Literal["*", "l"]]]
 
 
-def is_32bit() -> bool:
-    """
-    Detect if Python is running in 32-bit mode.
-    Returns True if running on 32-bit Python, False for 64-bit.
-    """
-    # Method 1: Check pointer size
-    bits = struct.calcsize("P") * 8
-
-    # Method 2: Check platform architecture string
-    try:
-        architecture = platform.architecture()[0]
-    except RuntimeError:
-        architecture = None
-
-    # Method 3: Check maxsize
-    is_small_maxsize = sys.maxsize <= 2**32
-
-    # Evaluate all available methods
-    is_32 = False
-
-    if bits == 32:
-        is_32 = True
-    elif architecture and "32" in architecture:
-        is_32 = True
-    elif is_small_maxsize:
-        is_32 = True
-
-    return is_32
-
-
-try:
-    # https://github.com/python/cpython/issues/101069 detection
-    if is_32bit():
-        datetime.datetime.fromtimestamp(3999999999)
-    OVERFLOW32B_MODE = False
-except OverflowError:
-    OVERFLOW32B_MODE = True
-
-
 UTC_DT = datetime.timezone.utc
-EPOCH = datetime.datetime.fromtimestamp(0, UTC_DT)
+EPOCH = datetime.datetime(1970, 1, 1, tzinfo=UTC_DT)
+
+# Deprecated, kept for backward compatibility: croniter no longer calls the
+# platform C library to convert timestamps, so it never hits the 32-bit
+# time_t overflow (https://github.com/python/cpython/issues/101069) and this
+# flag is no longer consulted.
+OVERFLOW32B_MODE = False
+
+
+def _timestamp_to_utc_datetime(timestamp: float) -> datetime.datetime:
+    """
+    Converts a UNIX `timestamp` into an aware UTC `datetime` using pure
+    `datetime` arithmetic, without `datetime.fromtimestamp()`. The latter
+    relies on the platform C `time_t` and raises `OverflowError` outside the
+    [1901, 2038] range on 32-bit builds.
+    """
+    return EPOCH + datetime.timedelta(seconds=timestamp)
 
 M_ALPHAS: dict[str, Union[int, str]] = {
     "jan": 1,
@@ -391,12 +365,7 @@ class croniter:
         """
         if tzinfo is MARKER:  # allow to give tzinfo=None even if self.tzinfo is set
             tzinfo = self.tzinfo
-        if OVERFLOW32B_MODE:
-            # degraded mode to workaround Y2038
-            # see https://github.com/python/cpython/issues/101069
-            result = EPOCH.replace(tzinfo=None) + datetime.timedelta(seconds=timestamp)
-        else:
-            result = datetime.datetime.fromtimestamp(timestamp, tz=tzutc()).replace(tzinfo=None)
+        result = _timestamp_to_utc_datetime(timestamp).replace(tzinfo=None)
         if tzinfo:
             result = result.replace(tzinfo=UTC_DT).astimezone(tzinfo)
         return result
@@ -1338,7 +1307,7 @@ class croniter:
         # Read the start time back in its own timezone. A naive start_time was
         # converted to a timestamp as if it were UTC, so UTC round-trips it to the
         # same wall clock and nothing changes for that case.
-        dt = datetime.datetime.fromtimestamp(from_timestamp, tz=tzinfo or UTC_DT)
+        dt = _timestamp_to_utc_datetime(from_timestamp).astimezone(tzinfo or UTC_DT)
         if field_index == MINUTE_FIELD:
             return dt.minute % step
         if field_index == HOUR_FIELD:
@@ -1446,7 +1415,7 @@ def croniter_range(
         )
     if isinstance(start, (float, int)):
         start, stop = (
-            datetime.datetime.fromtimestamp(t, tzutc()).replace(tzinfo=None) for t in (start, stop)
+            _timestamp_to_utc_datetime(t).replace(tzinfo=None) for t in (start, stop)
         )
         auto_rt = float
     if ret_type is None:
