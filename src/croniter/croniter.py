@@ -14,7 +14,7 @@ from time import time
 from typing import Any, Literal, Optional, Union
 
 from dateutil.relativedelta import relativedelta
-from dateutil.tz import datetime_exists, tzutc
+from dateutil.tz import datetime_exists
 
 ExpandedExpression = list[Union[int, Literal["*", "l"]]]
 
@@ -56,6 +56,9 @@ try:
     OVERFLOW32B_MODE = False
 except OverflowError:
     OVERFLOW32B_MODE = True
+# NOTE: OVERFLOW32B_MODE is kept for backward compatibility only. Timestamp
+# conversion no longer relies on the platform time_t, so the Y2038 overflow
+# is avoided regardless of its value.
 
 
 UTC_DT = datetime.timezone.utc
@@ -144,6 +147,17 @@ def datetime_to_timestamp(d):
         d = d.replace(tzinfo=None) - d.utcoffset()
 
     return (d - datetime.datetime(1970, 1, 1)).total_seconds()
+
+
+def _timestamp_to_utc_datetime(timestamp):
+    """
+    Converts a UNIX `timestamp` into a naive UTC `datetime` object.
+
+    Uses pure `datetime` arithmetic instead of `datetime.fromtimestamp`
+    so the result does not depend on the platform `time_t` width, which
+    overflows outside the 1901-2038 range on 32-bit systems.
+    """
+    return EPOCH.replace(tzinfo=None) + datetime.timedelta(seconds=timestamp)
 
 
 def _is_leap(year: int) -> bool:
@@ -391,12 +405,10 @@ class croniter:
         """
         if tzinfo is MARKER:  # allow to give tzinfo=None even if self.tzinfo is set
             tzinfo = self.tzinfo
-        if OVERFLOW32B_MODE:
-            # degraded mode to workaround Y2038
-            # see https://github.com/python/cpython/issues/101069
-            result = EPOCH.replace(tzinfo=None) + datetime.timedelta(seconds=timestamp)
-        else:
-            result = datetime.datetime.fromtimestamp(timestamp, tz=tzutc()).replace(tzinfo=None)
+        # Do not use datetime.fromtimestamp here: it relies on the platform
+        # time_t and raises OverflowError outside the 1901-2038 range on
+        # 32-bit systems (https://github.com/python/cpython/issues/101069).
+        result = _timestamp_to_utc_datetime(timestamp)
         if tzinfo:
             result = result.replace(tzinfo=UTC_DT).astimezone(tzinfo)
         return result
@@ -1338,7 +1350,11 @@ class croniter:
         # Read the start time back in its own timezone. A naive start_time was
         # converted to a timestamp as if it were UTC, so UTC round-trips it to the
         # same wall clock and nothing changes for that case.
-        dt = datetime.datetime.fromtimestamp(from_timestamp, tz=tzinfo or UTC_DT)
+        # _timestamp_to_utc_datetime is used instead of datetime.fromtimestamp
+        # to avoid overflowing the platform time_t on 32-bit systems.
+        dt = _timestamp_to_utc_datetime(from_timestamp)
+        if tzinfo is not None:
+            dt = dt.replace(tzinfo=UTC_DT).astimezone(tzinfo)
         if field_index == MINUTE_FIELD:
             return dt.minute % step
         if field_index == HOUR_FIELD:
@@ -1445,9 +1461,7 @@ def croniter_range(
             f"The start and stop must be same type.  {type(start)} != {type(stop)}"
         )
     if isinstance(start, (float, int)):
-        start, stop = (
-            datetime.datetime.fromtimestamp(t, tzutc()).replace(tzinfo=None) for t in (start, stop)
-        )
+        start, stop = (_timestamp_to_utc_datetime(t) for t in (start, stop))
         auto_rt = float
     if ret_type is None:
         ret_type = auto_rt

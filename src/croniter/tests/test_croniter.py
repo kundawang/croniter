@@ -5,6 +5,7 @@ import zoneinfo
 from datetime import datetime, timedelta
 from functools import partial
 from time import sleep
+from unittest import mock
 
 import dateutil.tz
 import pytz
@@ -14,7 +15,9 @@ from croniter import (
     CroniterBadDateError,
     CroniterNotAlphaError,
     CroniterUnsupportedSyntaxError,
+    cron_m,
     croniter,
+    croniter_range,
     datetime_to_timestamp,
 )
 from croniter.croniter import VALID_LEN_EXPRESSION
@@ -3611,6 +3614,94 @@ def gen_all_sunday_forms(expr, loops=None, start=None, is_prev=None):
     n = cron.get_prev if is_prev else cron.get_next
     ret3 = [a.day for a in [n(datetime) for i in range(loops or 30)]]
     return ret1, ret2, ret3
+
+
+class Croniter32BitTimeTTest(base.TestCase):
+    """
+    Simulate a 32-bit platform where ``datetime.fromtimestamp`` relies on a
+    32-bit ``time_t`` and raises ``OverflowError`` for timestamps outside
+    the 1901-2038 range (https://github.com/python/cpython/issues/101069).
+
+    croniter must convert timestamps without relying on the platform
+    ``time_t`` width.
+    """
+
+    def setUp(self):
+        super().setUp()
+        real_datetime_module = cron_m.datetime
+        real_datetime = real_datetime_module.datetime
+
+        class FakeDateTimeMeta(type):
+            # Keep isinstance/issubclass checks against the patched
+            # ``datetime.datetime`` working for real datetime objects.
+            def __instancecheck__(cls, instance):
+                return isinstance(instance, real_datetime)
+
+            def __subclasscheck__(cls, subclass):
+                return issubclass(subclass, real_datetime)
+
+        class OverflowingDateTime(real_datetime, metaclass=FakeDateTimeMeta):
+            """datetime whose fromtimestamp mimics a 32-bit time_t."""
+
+            @classmethod
+            def fromtimestamp(cls, timestamp, tz=None):
+                if not (-(2**31) <= timestamp <= 2**31 - 1):
+                    raise OverflowError("timestamp out of range for platform time_t")
+                return real_datetime.fromtimestamp(timestamp, tz)
+
+        class FakeDatetimeModule:
+            datetime = OverflowingDateTime
+
+            def __getattr__(self, name):
+                return getattr(real_datetime_module, name)
+
+        for patcher in (
+            mock.patch.object(cron_m, "datetime", FakeDatetimeModule()),
+            mock.patch.object(cron_m, "OVERFLOW32B_MODE", True),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_simulated_32bit_fromtimestamp_overflows(self):
+        # sanity check: the 32-bit time_t simulation is active
+        with self.assertRaises(OverflowError):
+            cron_m.datetime.datetime.fromtimestamp(2**31)
+
+    def test_get_next_beyond_2038(self):
+        itr = croniter("* * * * *", datetime(2040, 1, 1, 0, 0))
+        self.assertEqual(itr.get_next(datetime), datetime(2040, 1, 1, 0, 1))
+        self.assertEqual(
+            itr.get_next(float),
+            datetime_to_timestamp(datetime(2040, 1, 1, 0, 2)),
+        )
+
+    def test_get_prev_beyond_2038(self):
+        itr = croniter("* * * * *", datetime(2040, 1, 1, 0, 0))
+        self.assertEqual(itr.get_prev(datetime), datetime(2039, 12, 31, 23, 59))
+
+    def test_get_next_with_tz_beyond_2038(self):
+        tz = dateutil.tz.gettz("Asia/Tokyo")
+        itr = croniter("0 0 * * *", datetime(2040, 1, 1, 0, 0, tzinfo=tz))
+        self.assertEqual(
+            itr.get_next(datetime),
+            datetime(2040, 1, 2, 0, 0, tzinfo=tz),
+        )
+
+    def test_expand_from_start_time_beyond_2038(self):
+        itr = croniter(
+            "*/7 * * * *",
+            datetime(2040, 1, 1, 0, 3),
+            expand_from_start_time=True,
+        )
+        self.assertEqual(itr.get_next(datetime), datetime(2040, 1, 1, 0, 10))
+
+    def test_croniter_range_float_beyond_2038(self):
+        start = datetime_to_timestamp(datetime(2040, 1, 1, 0, 0))
+        stop = datetime_to_timestamp(datetime(2040, 1, 1, 3, 0))
+        self.assertEqual(
+            list(croniter_range(start, stop, "0 * * * *")),
+            [datetime_to_timestamp(datetime(2040, 1, 1, hour, 0)) for hour in range(4)],
+        )
 
 
 if __name__ == "__main__":
